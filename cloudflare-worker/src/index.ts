@@ -1,26 +1,308 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 
-export default {
-	async fetch(request, env, ctx): Promise<Response> {
-		const url = new URL(request.url);
-		switch (url.pathname) {
-			case '/message':
-				return new Response('Hello, World!');
-			case '/random':
-				return new Response(crypto.randomUUID());
-			default:
-				return new Response('Not Found', { status: 404 });
-		}
-	},
-} satisfies ExportedHandler<Env>;
+interface Env {
+  DB: D1Database;
+}
+
+type TaskRow = {
+  id: number;
+  title: string;
+  description: string | null;
+  status: string;
+  priority: number;
+  dependencies: string | null;
+  subtasks: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type TaskResponse = {
+  id: number;
+  title: string;
+  description: string | null;
+  status: string;
+  priority: number;
+  dependencies: string[];
+  subtasks: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+type TaskPayload = {
+  title?: string;
+  description?: string | null;
+  status?: string;
+  priority?: number;
+  dependencies?: unknown;
+  subtasks?: unknown;
+};
+
+const toStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.map((item) => String(item)).filter((item) => item.length > 0);
+};
+
+const safeParseJsonArray = (value: string | null): string[] => {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
+  } catch {
+    return [];
+  }
+};
+
+const mapRowToResponse = (row: TaskRow): TaskResponse => ({
+  id: row.id,
+  title: row.title,
+  description: row.description,
+  status: row.status,
+  priority: row.priority,
+  dependencies: safeParseJsonArray(row.dependencies),
+  subtasks: safeParseJsonArray(row.subtasks),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.use('/api/*', cors());
+
+app.get('/', (c) =>
+  c.json({
+    name: 'AI Task Master Worker',
+    message: 'Cloudflare Worker is running',
+  }),
+);
+
+app.get('/api/tasks', async (c) => {
+  const status = c.req.query('status');
+  const priorityParam = c.req.query('priority');
+  const search = c.req.query('search');
+  const limitParam = c.req.query('limit');
+  const offsetParam = c.req.query('offset');
+
+  const conditions: string[] = [];
+  const bindings: unknown[] = [];
+
+  if (status) {
+    conditions.push('status = ?');
+    bindings.push(status);
+  }
+
+  if (priorityParam) {
+    const parsedPriority = Number(priorityParam);
+    if (!Number.isFinite(parsedPriority)) {
+      return c.json({ error: 'Invalid priority filter supplied' }, 400);
+    }
+    conditions.push('priority = ?');
+    bindings.push(parsedPriority);
+  }
+
+  if (search) {
+    conditions.push('(title LIKE ? OR description LIKE ?)');
+    const searchTerm = `%${search}%`;
+    bindings.push(searchTerm, searchTerm);
+  }
+
+  let query = 'SELECT * FROM tasks';
+  if (conditions.length) {
+    query += ` WHERE ${conditions.join(' AND ')}`;
+  }
+  query += ' ORDER BY priority DESC, created_at DESC';
+
+  const limit = Math.min(Math.max(Number(limitParam) || 50, 1), 100);
+  const offset = Math.max(Number(offsetParam) || 0, 0);
+  query += ' LIMIT ? OFFSET ?';
+  bindings.push(limit, offset);
+
+  const stmt = c.env.DB.prepare(query).bind(...bindings);
+  const { results } = await stmt.all<TaskRow>();
+
+  const tasks = (results ?? []).map(mapRowToResponse);
+  return c.json({
+    tasks,
+    pagination: {
+      limit,
+      offset,
+      count: tasks.length,
+    },
+  });
+});
+
+app.get('/api/tasks/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) {
+    return c.json({ error: 'Task ID must be an integer' }, 400);
+  }
+
+  const stmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
+  const task = await stmt.first<TaskRow>();
+  if (!task) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
+
+  return c.json({ task: mapRowToResponse(task) });
+});
+
+app.post('/api/tasks', async (c) => {
+  let payload: TaskPayload;
+  try {
+    payload = await c.req.json<TaskPayload>();
+  } catch (error) {
+    console.error('Failed to parse JSON body for POST /api/tasks', error);
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  if (!payload.title || !payload.title.trim()) {
+    return c.json({ error: 'Task title is required' }, 400);
+  }
+
+  const title = payload.title.trim();
+  const description = payload.description ?? null;
+  const status = payload.status?.trim() || 'pending';
+  const priority = Number(payload.priority ?? 1);
+  if (!Number.isFinite(priority)) {
+    return c.json({ error: 'Priority must be a valid number' }, 400);
+  }
+
+  const dependencies = JSON.stringify(toStringArray(payload.dependencies));
+  const subtasks = JSON.stringify(toStringArray(payload.subtasks));
+
+  const insertStmt = c.env.DB
+    .prepare(
+      `INSERT INTO tasks (title, description, status, priority, dependencies, subtasks)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(title, description, status, priority, dependencies, subtasks);
+
+  const result = await insertStmt.run();
+  if (!result.success) {
+    console.error('Failed to insert task', result);
+    return c.json({ error: 'Failed to create task' }, 500);
+  }
+
+  const taskId = Number(result.lastInsertRowId);
+  const taskStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(taskId);
+  const task = await taskStmt.first<TaskRow>();
+
+  return c.json({ task: task ? mapRowToResponse(task) : null }, 201);
+});
+
+app.put('/api/tasks/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) {
+    return c.json({ error: 'Task ID must be an integer' }, 400);
+  }
+
+  let payload: TaskPayload;
+  try {
+    payload = await c.req.json<TaskPayload>();
+  } catch (error) {
+    console.error('Failed to parse JSON body for PUT /api/tasks/:id', error);
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const updates: string[] = [];
+  const bindings: unknown[] = [];
+
+  if (payload.title !== undefined) {
+    if (!payload.title || !payload.title.trim()) {
+      return c.json({ error: 'Title cannot be empty' }, 400);
+    }
+    updates.push('title = ?');
+    bindings.push(payload.title.trim());
+  }
+
+  if (payload.description !== undefined) {
+    updates.push('description = ?');
+    bindings.push(payload.description ?? null);
+  }
+
+  if (payload.status !== undefined) {
+    updates.push('status = ?');
+    bindings.push(payload.status.trim());
+  }
+
+  if (payload.priority !== undefined) {
+    const priority = Number(payload.priority);
+    if (!Number.isFinite(priority)) {
+      return c.json({ error: 'Priority must be a valid number' }, 400);
+    }
+    updates.push('priority = ?');
+    bindings.push(priority);
+  }
+
+  if (payload.dependencies !== undefined) {
+    updates.push('dependencies = ?');
+    bindings.push(JSON.stringify(toStringArray(payload.dependencies)));
+  }
+
+  if (payload.subtasks !== undefined) {
+    updates.push('subtasks = ?');
+    bindings.push(JSON.stringify(toStringArray(payload.subtasks)));
+  }
+
+  if (!updates.length) {
+    return c.json({ error: 'No valid fields provided for update' }, 400);
+  }
+
+  updates.push("updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')");
+  const updateSql = `UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`;
+  const updateStmt = c.env.DB.prepare(updateSql).bind(...bindings, id);
+  const result = await updateStmt.run();
+
+  if (!result.success) {
+    console.error('Failed to update task', result);
+    return c.json({ error: 'Failed to update task' }, 500);
+  }
+
+  if (result.changes === 0) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
+
+  const taskStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
+  const task = await taskStmt.first<TaskRow>();
+  if (!task) {
+    return c.json({ error: 'Task not found after update' }, 404);
+  }
+
+  return c.json({ task: mapRowToResponse(task) });
+});
+
+app.delete('/api/tasks/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) {
+    return c.json({ error: 'Task ID must be an integer' }, 400);
+  }
+
+  const deleteStmt = c.env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(id);
+  const result = await deleteStmt.run();
+
+  if (!result.success) {
+    console.error('Failed to delete task', result);
+    return c.json({ error: 'Failed to delete task' }, 500);
+  }
+
+  if (result.changes === 0) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
+
+  return c.json({ success: true });
+});
+
+app.onError((err, c) => {
+  console.error('Unhandled error in Worker', err);
+  return c.json({ error: 'Internal Server Error' }, 500);
+});
+
+app.notFound((c) => c.json({ error: 'Not Found' }, 404));
+
+export default app;
