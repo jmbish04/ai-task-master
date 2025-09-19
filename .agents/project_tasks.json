@@ -11,7 +11,7 @@
           "taskId": "TASK-001",
           "title": "Initialize Wrangler Project",
           "description": "Set up a new Cloudflare Worker project using Wrangler.",
-          "status": "done",
+          "status": "pending",
           "instructions": "Use `wrangler init ai-task-master --type=typescript`. Create a TypeScript Worker project. After initialization, run `wrangler types` to generate proper TypeScript types for your Worker environment including bindings. This command generates types based on your Worker configuration, including `Env` types based on your bindings and runtime types based on the `compatibility_date` and `compatibility_flags` in your config file. Always use the latest compatibility_date (2024-09-26 or newer). Set `compatibility_flags = [\"nodejs_compat\"]` if you need Node.js compatibility. Refer to `.agents/cloudflare_docs/workers-llms-full.txt` for project structure and configuration best practices."
         },
         {
