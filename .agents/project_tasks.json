@@ -20,6 +20,7 @@
           "description": "Set up an HTTP router (Hono preferred) to handle incoming requests.",
           "status": "done",
           "dependencies": ["TASK-001"],
+
           "instructions": "Install Hono framework: `npm install hono`. Hono is the recommended lightweight framework for Cloudflare Workers. Create basic routing structure using Hono's type-safe routing. Use `app.route()` to organize routes into separate files for better structure. Example: `app.route('/api/v1', apiRoutes)`. Hono provides built-in CORS support via `import { cors } from 'hono/cors'` and `app.use('/api/*', cors())`. Always define your environment interface properly: `const app = new Hono<{ Bindings: Env }>()`. Use module worker syntax (not service worker). Details and examples are in `.agents/cloudflare_docs/workers-llms-full.txt`."
         },
         {
@@ -41,23 +42,28 @@
           "taskId": "TASK-004",
           "title": "Design D1 Database Schema",
           "description": "Define the SQL schema for tasks, including columns for id, title, description, status, priority, dependencies, and subtasks.",
-          "status": "pending",
+          "status": "completed",
           "instructions": "Create a `migrations/` folder in your project root. Use numbered migration files like `0001_initial_schema.sql`, `0002_add_indexes.sql`. D1 supports standard SQL with SQLite syntax. Use proper data types: INTEGER for IDs, TEXT for strings, REAL for numbers, datetime strings in ISO format. Create indexes for performance on frequently queried columns. Use `CREATE TABLE IF NOT EXISTS` for safety. Example: `CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT, status TEXT DEFAULT 'pending', priority INTEGER DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`. Create a `schema.sql` file. For data types and best practices, see `.agents/cloudflare_docs/d1-llms-full.txt`."
         },
         {
           "taskId": "TASK-005",
           "title": "Bind D1 Database to Worker",
           "description": "Configure `wrangler.toml` to bind a D1 database to the worker.",
-          "status": "pending",
-          "dependencies": ["TASK-001", "TASK-004"],
+          "status": "completed",
+          "dependencies": [
+            "TASK-001",
+            "TASK-004"
+          ],
           "instructions": "First create the D1 database: `wrangler d1 create ai-task-master-db`. Add D1 binding to `wrangler.toml`: `[[d1_databases]]\\nbinding = \"DB\"\\ndatabase_name = \"ai-task-master-db\"\\ndatabase_id = \"<UUID>\"\\npreview_database_id = \"<UUID>\"`. The binding name 'DB' makes the database available as `env.DB` in your Worker code. For local development, use `preview_database_id` or set it to a local database ID. Apply migrations with: `wrangler d1 migrations apply ai-task-master-db --local` for local dev, `wrangler d1 migrations apply ai-task-master-db --remote` for production. After binding changes, run `wrangler types` to regenerate TypeScript types. Follow the binding instructions in `.agents/cloudflare_docs/d1-llms-full.txt`."
         },
         {
           "taskId": "TASK-006",
           "title": "Implement Task CRUD Operations",
           "description": "Write and expose API endpoints for creating, reading, updating, and deleting tasks in the D1 database.",
-          "status": "pending",
-          "dependencies": ["TASK-005"],
+          "status": "completed",
+          "dependencies": [
+            "TASK-005"
+          ],
           "instructions": "Use the D1 binding via `env.DB`. Always use prepared statements for security: `const stmt = env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(taskId)`. Use `stmt.first()` for single records, `stmt.all()` for multiple records, `stmt.run()` for INSERT/UPDATE/DELETE. Use `env.DB.batch([stmt1, stmt2])` for transactions. Handle D1Result properly - check `.success` property and access data via `.results`. For TypeScript, define row types: `type TaskRow = { id: number; title: string; ... }` and use generics: `stmt.first<TaskRow>()`. Use proper HTTP status codes: 200 for success, 201 for created, 404 for not found, 400 for bad requests. Implement proper error handling for database operations. Code examples are available in `.agents/cloudflare_docs/d1-llms-full.txt`."
         }
       ]
@@ -72,7 +78,9 @@
           "title": "Setup Durable Object for WebSockets",
           "description": "Create a Durable Object to manage WebSocket connections, handle message broadcasting, and maintain connection state.",
           "status": "pending",
-          "dependencies": ["TASK-003"],
+          "dependencies": [
+            "TASK-003"
+          ],
           "instructions": "Import Durable Object base class: `import { DurableObject } from 'cloudflare:workers'`. Create a class extending DurableObject: `export class WebSocketServer extends DurableObject`. In wrangler.toml, add: `[[durable_objects.bindings]]\\nname = \"WEBSOCKET_SERVER\"\\nclass_name = \"WebSocketServer\"` and `[[migrations]]\\ntag = \"v1\"\\nnew_sqlite_classes = [\"WebSocketServer\"]`. Access via `env.WEBSOCKET_SERVER.get(id)` or `env.WEBSOCKET_SERVER.getByName('name')`. Use WebSocket Hibernation API for cost efficiency - this allows WebSocket connections to remain open without charging for inactive time. Handle WebSocket pair creation: `const webSocketPair = new WebSocketPair(); const [client, server] = Object.values(webSocketPair); server.accept();`. Return client in Response: `return new Response(null, { status: 101, webSocket: client });`. Use Map to track connections: `this.sessions = new Map()`. See `.agents/cloudflare_docs/durable-objects-llms-full.txt`."
         },
         {
@@ -80,7 +88,10 @@
           "title": "Broadcast Task Updates",
           "description": "Whenever a task is created or its status is updated, broadcast the change to all connected WebSocket clients.",
           "status": "pending",
-          "dependencies": ["TASK-006", "TASK-007"],
+          "dependencies": [
+            "TASK-006",
+            "TASK-007"
+          ],
           "instructions": "After successful D1 database operations (CREATE/UPDATE/DELETE), get the Durable Object instance and call a broadcast method. Use `env.WEBSOCKET_SERVER.getByName('broadcast')` to get a consistent instance for broadcasting. Create a broadcast method in your Durable Object that iterates through `this.sessions.forEach()` and sends updates to all connected WebSocket clients. Handle disconnected clients gracefully by removing them from the sessions Map. Send structured JSON messages: `JSON.stringify({ type: 'task_update', action: 'created|updated|deleted', task: taskData })`. Use WebSocket hibernation's `send()` method. Consider implementing message queuing for reliability. See `.agents/cloudflare_docs/durable-objects-llms-full.txt` for broadcasting patterns."
         }
       ]
@@ -95,7 +106,9 @@
           "title": "Bind Workers AI to Worker",
           "description": "Configure `wrangler.toml` to bind the Workers AI service.",
           "status": "pending",
-          "dependencies": ["TASK-001"],
+          "dependencies": [
+            "TASK-001"
+          ],
           "instructions": "Add Workers AI binding to `wrangler.toml`: `[ai]\\nbinding = \"AI\"`. This makes Workers AI available as `env.AI` in your Worker code. No imports needed - access directly via the environment binding. After adding the binding, run `wrangler types` to generate proper TypeScript types including the `Ai` interface. For local development, use `wrangler dev --ai` to enable AI binding locally. The binding provides the `.run()` method: `await env.AI.run(model, input, options)`. Use the latest recommended models like `@cf/meta/llama-3.1-8b-instruct` for text generation. For TypeScript, define your Env interface: `interface Env { AI: Ai; }`. Follow binding instructions in `.agents/cloudflare_docs/workers-ai-llms-full.txt`."
         },
         {
@@ -103,7 +116,9 @@
           "title": "Implement 'resolve-issue' Endpoint",
           "description": "Create an endpoint that takes a task ID and an issue description. The endpoint will use Workers AI to analyze the task and suggest a resolution.",
           "status": "pending",
-          "dependencies": ["TASK-009"],
+          "dependencies": [
+            "TASK-009"
+          ],
           "instructions": "Create a POST endpoint `/api/tasks/{id}/resolve` that accepts JSON: `{ issue: string }`. First fetch the task from D1 using the task ID. Construct a detailed prompt for the AI model including task context and the specific issue. Use `await env.AI.run('@cf/meta/llama-3.1-8b-instruct', { prompt: constructedPrompt })` for analysis. The model `@cf/meta/llama-3.1-8b-instruct` is recommended for instruction-following tasks. Handle the AI response and extract actionable suggestions. Return structured JSON with the AI's analysis and suggested resolution steps. Implement proper error handling for both D1 queries and AI inference failures. Consider adding streaming responses for longer AI outputs using the `stream: true` option. See prompting guides in `.agents/cloudflare_docs/workers-ai-llms-full.txt`."
         }
       ]
@@ -118,7 +133,9 @@
           "title": "Bind R2 Bucket to Worker",
           "description": "Configure `wrangler.toml` to bind an R2 bucket for storing generated files.",
           "status": "pending",
-          "dependencies": ["TASK-001"],
+          "dependencies": [
+            "TASK-001"
+          ],
           "instructions": "First create an R2 bucket: `wrangler r2 bucket create ai-generated-code`. Add R2 binding to `wrangler.toml`: `[[r2_buckets]]\\nbinding = \"CODE_BUCKET\"\\nbucket_name = \"ai-generated-code\"`. This makes the bucket available as `env.CODE_BUCKET` in your Worker code with full R2 API access. R2 provides methods: `.put(key, value, options)`, `.get(key)`, `.delete(key)`, `.list(options)`. Use proper key naming conventions like `tasks/{taskId}/generated_code.{ext}`. After adding bindings, run `wrangler types` to generate TypeScript types including `R2Bucket` interface. For local development, R2 operations will work against local storage unless you use remote bindings. The binding gives you access to the full R2 Workers API. Follow the R2 binding guide in `.agents/cloudflare_docs/r2-llms-full.txt`."
         },
         {
@@ -126,7 +143,10 @@
           "title": "Create Durable Object for Code Generation",
           "description": "Set up a Durable Object to manage the state and execution of code generation requests.",
           "status": "pending",
-          "dependencies": ["TASK-009", "TASK-011"],
+          "dependencies": [
+            "TASK-009",
+            "TASK-011"
+          ],
           "instructions": "Create a new Durable Object class: `export class CodeGeneratorDO extends DurableObject`. Add to wrangler.toml: `[[durable_objects.bindings]]\\nname = \"CODE_GENERATOR\"\\nclass_name = \"CodeGeneratorDO\"` and update migrations: `[[migrations]]\\ntag = \"v2\"\\nnew_sqlite_classes = [\"CodeGeneratorDO\"]`. This DO will orchestrate long-running code generation tasks. Use the constructor to initialize: `constructor(ctx: DurableObjectState, env: Env)`. Access other bindings through the env parameter (AI, R2, DB). Implement methods for: starting generation jobs, tracking progress, storing results to R2. Use Durable Object storage for job state: `await this.ctx.storage.put('job:${jobId}', jobData)`. Communicate back to clients via WebSocket or polling endpoints. Refer to `.agents/cloudflare_docs/durable-objects-llms-full.txt`."
         },
         {
@@ -134,7 +154,9 @@
           "title": "Implement '/generate-code' Endpoint",
           "description": "Create an endpoint that accepts a task ID. This endpoint will instantiate the code generation Durable Object to start the process.",
           "status": "pending",
-          "dependencies": ["TASK-012"],
+          "dependencies": [
+            "TASK-012"
+          ],
           "instructions": "Create a POST endpoint `/api/tasks/{id}/generate-code`. Validate the task exists in D1 database first. Generate a unique job ID using `crypto.randomUUID()`. Get Durable Object instance: `const stub = env.CODE_GENERATOR.get(env.CODE_GENERATOR.idFromName(jobId))` for consistent routing or use `idFromString()` for load distribution. Call the DO with task data: `const response = await stub.fetch(new Request('http://do/start-generation', { method: 'POST', body: JSON.stringify({ taskId, jobId, ...taskData }) }))`. Return the job ID immediately to the client: `{ jobId, status: 'started', message: 'Code generation initiated' }`. The endpoint should be fast and asynchronous - the DO handles the background processing. Implement a separate `/api/jobs/{jobId}/status` endpoint for polling job progress."
         },
         {
@@ -142,7 +164,9 @@
           "title": "Implement Code Generation Logic",
           "description": "Inside the Durable Object, call Workers AI with the task description to generate code, then write the output to the R2 bucket.",
           "status": "pending",
-          "dependencies": ["TASK-012"],
+          "dependencies": [
+            "TASK-012"
+          ],
           "instructions": "In the CodeGeneratorDO, implement the generation workflow: 1) Receive task data and update job status. 2) Construct detailed prompts for code generation using task description, requirements, and context. Use a model suitable for code generation like `@cf/meta/llama-3.1-8b-instruct` with detailed coding prompts. 3) Call `await env.AI.run(model, { prompt: codePrompt })` to generate code. 4) Process the AI response to extract clean code (remove markdown formatting, etc.). 5) Store the generated code in R2: `await env.CODE_BUCKET.put(`tasks/${taskId}/generated_code.js`, generatedCode, { httpMetadata: { contentType: 'text/javascript' } })`. 6) Update job status and store completion info. Handle errors gracefully and update job status accordingly. See `.agents/cloudflare_docs/workers-ai-llms-full.txt` and `.agents/cloudflare_docs/r2-llms-full.txt`."
         },
         {
@@ -150,7 +174,10 @@
           "title": "Implement '/download-code' Endpoint",
           "description": "Create an endpoint that takes a task ID and serves the corresponding file from the R2 bucket, allowing for download via `curl` or other clients.",
           "status": "pending",
-          "dependencies": ["TASK-011", "TASK-014"],
+          "dependencies": [
+            "TASK-011",
+            "TASK-014"
+          ],
           "instructions": "Create a GET endpoint `/api/tasks/{id}/download-code`. First validate the task exists and code was generated. Use `const object = await env.CODE_BUCKET.get(`tasks/${taskId}/generated_code.js`)`. Check if object exists: `if (!object) return new Response('Code not found', { status: 404 })`. Stream the R2 object in response: `return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Content-Disposition': `attachment; filename=\"task-${taskId}-code.js\"`, 'Cache-Control': 'public, max-age=3600' } })`. For large files, R2 automatically handles streaming. Add optional query parameter for different file formats if multiple files were generated. Implement proper error handling for missing files or R2 access errors. See `.agents/cloudflare_docs/r2-llms-full.txt`."
         }
       ]
@@ -165,7 +192,9 @@
           "title": "Implement Frontend API Endpoints",
           "description": "Ensure all necessary data-fetching endpoints (e.g., get all tasks, get task by ID) are available and optimized for a frontend client.",
           "status": "pending",
-          "dependencies": ["TASK-006"],
+          "dependencies": [
+            "TASK-006"
+          ],
           "instructions": "Create comprehensive REST API endpoints: GET `/api/tasks` (with pagination, filtering), GET `/api/tasks/{id}`, PUT `/api/tasks/{id}`, DELETE `/api/tasks/{id}`, POST `/api/tasks/{id}/status` for status updates. Use Hono's built-in CORS middleware: `import { cors } from 'hono/cors'` and apply with `app.use('/api/*', cors({ origin: ['http://localhost:3000', 'https://yourdomain.com'], allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }))`. Implement proper JSON serialization/deserialization. Add request validation using Hono's validator middleware. Return consistent API responses with proper HTTP status codes. Add pagination for list endpoints using query parameters: `?page=1&limit=20`. Implement etags for caching. For TypeScript, define proper request/response types. Reference `.agents/cloudflare_docs/workers-llms-full.txt`."
         },
         {
@@ -173,7 +202,9 @@
           "title": "Integrate MCP Server Logic",
           "description": "Add support for the MCP protocol for interoperability with other MCP-compliant agents.",
           "status": "pending",
-          "dependencies": ["TASK-002"],
+          "dependencies": [
+            "TASK-002"
+          ],
           "instructions": "Create an MCP-compatible endpoint structure. Start with a basic MCP server implementation: create POST `/mcp` endpoint that handles MCP protocol messages. Implement the standard MCP message format with proper JSON-RPC 2.0 structure: `{ jsonrpc: '2.0', method: string, params: object, id: string|number }`. For now, create a stub endpoint that returns `{ jsonrpc: '2.0', result: { status: 'ok', version: '1.0', capabilities: ['task_management', 'ai_assistance'] }, id: request.id }`. The MCP server should expose your task management capabilities as MCP tools/resources. Plan to implement proper MCP resource discovery, tool execution, and notification systems. This is a placeholder for a future, more detailed epic. For initial concepts, refer to `.agents/cloudflare_docs/workers-llms-full.txt`."
         }
       ]
