@@ -11,27 +11,24 @@
           "taskId": "TASK-001",
           "title": "Initialize Wrangler Project",
           "description": "Set up a new Cloudflare Worker project using Wrangler.",
-          "status": "pending",
+          "status": "done",
           "instructions": "Use `wrangler init ai-task-master --type=typescript`. Create a TypeScript Worker project. After initialization, run `wrangler types` to generate proper TypeScript types for your Worker environment including bindings. This command generates types based on your Worker configuration, including `Env` types based on your bindings and runtime types based on the `compatibility_date` and `compatibility_flags` in your config file. Always use the latest compatibility_date (2024-09-26 or newer). Set `compatibility_flags = [\"nodejs_compat\"]` if you need Node.js compatibility. Refer to `.agents/cloudflare_docs/workers-llms-full.txt` for project structure and configuration best practices."
         },
         {
           "taskId": "TASK-002",
           "title": "Implement Basic Routing",
           "description": "Set up an HTTP router (Hono preferred) to handle incoming requests.",
-          "status": "pending",
-          "dependencies": [
-            "TASK-001"
-          ],
+          "status": "done",
+          "dependencies": ["TASK-001"],
+
           "instructions": "Install Hono framework: `npm install hono`. Hono is the recommended lightweight framework for Cloudflare Workers. Create basic routing structure using Hono's type-safe routing. Use `app.route()` to organize routes into separate files for better structure. Example: `app.route('/api/v1', apiRoutes)`. Hono provides built-in CORS support via `import { cors } from 'hono/cors'` and `app.use('/api/*', cors())`. Always define your environment interface properly: `const app = new Hono<{ Bindings: Env }>()`. Use module worker syntax (not service worker). Details and examples are in `.agents/cloudflare_docs/workers-llms-full.txt`."
         },
         {
           "taskId": "TASK-003",
           "title": "Create WebSocket Endpoint",
           "description": "Implement an endpoint that upgrades HTTP connections to WebSockets for real-time communication.",
-          "status": "pending",
-          "dependencies": [
-            "TASK-002"
-          ],
+          "status": "done",
+          "dependencies": ["TASK-002"],
           "instructions": "For Hono, use the WebSocket helper: `import { upgradeWebSocket } from 'hono/cloudflare-workers'`. Create a WebSocket upgrade endpoint that checks for proper `Upgrade: websocket` header. Return status 426 if not a valid WebSocket upgrade request. Use the standard pattern: check for `request.headers.get('Upgrade') === 'websocket'`, then forward to Durable Object for stateful connection management. The Worker should validate the request and proxy to the Durable Object, not handle WebSocket connections directly. Refer to `.agents/cloudflare_docs/workers-llms-full.txt` to handle the `Upgrade` header and establish a WebSocket connection."
         }
       ]
