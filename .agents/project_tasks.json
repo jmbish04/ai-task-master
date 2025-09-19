@@ -42,7 +42,7 @@
           "taskId": "TASK-004",
           "title": "Design D1 Database Schema",
           "description": "Define the SQL schema for tasks, including columns for id, title, description, status, priority, dependencies, and subtasks.",
-          "status": "completed",
+          "status": "done",
           "instructions": "Create a `migrations/` folder in your project root. Use numbered migration files like `0001_initial_schema.sql`, `0002_add_indexes.sql`. D1 supports standard SQL with SQLite syntax. Use proper data types: INTEGER for IDs, TEXT for strings, REAL for numbers, datetime strings in ISO format. Create indexes for performance on frequently queried columns. Use `CREATE TABLE IF NOT EXISTS` for safety. Example: `CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, description TEXT, status TEXT DEFAULT 'pending', priority INTEGER DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`. Create a `schema.sql` file. For data types and best practices, see `.agents/cloudflare_docs/d1-llms-full.txt`."
         },
         {
@@ -60,7 +60,7 @@
           "taskId": "TASK-006",
           "title": "Implement Task CRUD Operations",
           "description": "Write and expose API endpoints for creating, reading, updating, and deleting tasks in the D1 database.",
-          "status": "completed",
+          "status": "done",
           "dependencies": [
             "TASK-005"
           ],
@@ -132,7 +132,7 @@
           "taskId": "TASK-011",
           "title": "Bind R2 Bucket to Worker",
           "description": "Configure `wrangler.toml` to bind an R2 bucket for storing generated files.",
-          "status": "pending",
+          "status": "done",
           "dependencies": [
             "TASK-001"
           ],
@@ -142,7 +142,7 @@
           "taskId": "TASK-012",
           "title": "Create Durable Object for Code Generation",
           "description": "Set up a Durable Object to manage the state and execution of code generation requests.",
-          "status": "pending",
+          "status": "done",
           "dependencies": [
             "TASK-009",
             "TASK-011"
@@ -153,7 +153,7 @@
           "taskId": "TASK-013",
           "title": "Implement '/generate-code' Endpoint",
           "description": "Create an endpoint that accepts a task ID. This endpoint will instantiate the code generation Durable Object to start the process.",
-          "status": "pending",
+          "status": "done",
           "dependencies": [
             "TASK-012"
           ],

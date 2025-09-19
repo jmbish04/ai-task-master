@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import type { DurableObjectState, WebSocket } from 'cloudflare:workers';
+import type { DurableObjectNamespace, DurableObjectState, R2Bucket, WebSocket } from 'cloudflare:workers';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 
@@ -8,6 +8,8 @@ interface Env {
   DB: D1Database;
   WEBSOCKET_SERVER: DurableObjectNamespace<WebSocketServer>;
   AI: Ai;
+  CODE_BUCKET: R2Bucket;
+  CODE_GENERATOR: DurableObjectNamespace<CodeGeneratorDO>;
 }
 
 // Types and helpers from codex/complete-epic-0002-and-update-tasks
@@ -43,6 +45,38 @@ type TaskPayload = {
   dependencies?: unknown;
   subtasks?: unknown;
 };
+
+type CodeGenerationJobStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+type CodeGenerationJobRecord = {
+  jobId: string;
+  taskId: number;
+  status: CodeGenerationJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  progress: number;
+  resultKey?: string;
+  error?: string;
+  taskSnapshot?: TaskResponse | null;
+  metadata?: Record<string, unknown>;
+};
+
+type StartGenerationPayload = {
+  jobId: string;
+  taskId: number;
+  task?: TaskResponse;
+  initiator?: string;
+  options?: Record<string, unknown>;
+};
+
+type PersistedArtifact = {
+  content: string | ArrayBuffer | ReadableStream;
+  extension?: string;
+  contentType?: string;
+  metadata?: Record<string, string>;
+};
+
+const JOB_KEY_PREFIX = 'job:';
 
 const toStringArray = (value: unknown): string[] => {
   if (!Array.isArray(value)) {
@@ -494,6 +528,99 @@ app.post('/api/tasks/:id/resolve', async (c) => {
   });
 });
 
+app.post('/api/tasks/:id/generate-code', async (c) => {
+  const idParam = c.req.param('id');
+  const taskId = Number(idParam);
+  if (!Number.isInteger(taskId)) {
+    return c.json({ error: 'Task ID must be an integer' }, 400);
+  }
+
+  const taskStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(taskId);
+  const task = await taskStmt.first<TaskRow>();
+  if (!task) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
+
+  const jobId = crypto.randomUUID();
+  const taskSnapshot = mapRowToResponse(task);
+
+  const stub = c.env.CODE_GENERATOR.get(c.env.CODE_GENERATOR.idFromName(jobId));
+  const payload: StartGenerationPayload = {
+    jobId,
+    taskId,
+    task: taskSnapshot,
+  };
+
+  let durableResponse: Response;
+  try {
+    durableResponse = await stub.fetch('https://code-generator/start-generation', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error('Failed to contact CodeGeneratorDO for job start', error);
+    return c.json({ error: 'Failed to initiate code generation job' }, 502);
+  }
+
+  let durableJson: unknown = null;
+  try {
+    durableJson = await durableResponse.json();
+  } catch (error) {
+    console.warn('CodeGeneratorDO did not return JSON payload', error);
+  }
+
+  if (!durableResponse.ok) {
+    const body = typeof durableJson === 'object' && durableJson !== null ? durableJson : { error: 'Failed to queue job' };
+    return c.json(body, durableResponse.status);
+  }
+
+  return c.json(
+    {
+      jobId,
+      taskId,
+      status: 'started',
+      message: 'Code generation initiated',
+      job: (durableJson as { job?: CodeGenerationJobRecord })?.job ?? null,
+    },
+    202,
+  );
+});
+
+app.get('/api/jobs/:jobId/status', async (c) => {
+  const rawJobId = c.req.param('jobId') ?? '';
+  const jobId = rawJobId.trim();
+  if (!jobId) {
+    return c.json({ error: 'jobId is required' }, 400);
+  }
+
+  const stub = c.env.CODE_GENERATOR.get(c.env.CODE_GENERATOR.idFromName(jobId));
+
+  let durableResponse: Response;
+  try {
+    durableResponse = await stub.fetch(`https://code-generator/status/${encodeURIComponent(jobId)}`);
+  } catch (error) {
+    console.error('Failed to query CodeGeneratorDO for job status', error);
+    return c.json({ error: 'Failed to retrieve job status' }, 502);
+  }
+
+  let durableJson: unknown = null;
+  try {
+    durableJson = await durableResponse.json();
+  } catch (error) {
+    console.warn('CodeGeneratorDO returned non-JSON response for status', error);
+  }
+
+  if (!durableResponse.ok) {
+    const body = typeof durableJson === 'object' && durableJson !== null ? durableJson : { error: 'Job status unavailable' };
+    return c.json(body, durableResponse.status);
+  }
+
+  return c.json(durableJson ?? { job: null });
+});
+
 // --- WebSocket route from main branch ---
 app.get('/ws/:roomId', async (c) => {
   const upgradeHeader = c.req.header('Upgrade');
@@ -693,5 +820,167 @@ export class WebSocketServer extends DurableObject {
     }
 
     return undefined;
+  }
+}
+
+export class CodeGeneratorDO extends DurableObject {
+  private readonly env: Env;
+
+  constructor(state: DurableObjectState, env: Env) {
+    super(state, env);
+    this.env = env;
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const segments = url.pathname.split('/').filter(Boolean);
+
+    if (request.method === 'POST' && segments[0] === 'start-generation') {
+      return this.handleStartGeneration(request);
+    }
+
+    if (request.method === 'GET' && segments[0] === 'status' && segments[1]) {
+      return this.handleStatusRequest(segments[1]);
+    }
+
+    return new Response('Not found', { status: 404 });
+  }
+
+  private async handleStartGeneration(request: Request): Promise<Response> {
+    let payload: StartGenerationPayload;
+    try {
+      payload = await request.json<StartGenerationPayload>();
+    } catch (error) {
+      console.error('Invalid job payload received by CodeGeneratorDO', error);
+      return Response.json({ error: 'Invalid job payload' }, { status: 400 });
+    }
+
+    const jobId = payload.jobId?.trim();
+    const taskId = Number(payload.taskId);
+
+    if (!jobId) {
+      return Response.json({ error: 'jobId is required' }, { status: 400 });
+    }
+
+    if (!Number.isFinite(taskId)) {
+      return Response.json({ error: 'taskId must be a number' }, { status: 400 });
+    }
+
+    const existing = await this.getJob(jobId);
+    if (existing) {
+      return Response.json({ job: existing, message: 'Job already exists' }, { status: 200 });
+    }
+
+    const now = new Date().toISOString();
+    const job: CodeGenerationJobRecord = {
+      jobId,
+      taskId,
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+      progress: 0,
+      taskSnapshot: payload.task ?? null,
+      metadata: payload.options,
+    };
+
+    await this.putJob(job);
+
+    this.ctx.waitUntil(this.processJob(job, payload));
+
+    return Response.json({ job }, { status: 202 });
+  }
+
+  private async handleStatusRequest(jobId: string): Promise<Response> {
+    const normalizedId = jobId.trim();
+    if (!normalizedId) {
+      return Response.json({ error: 'jobId is required' }, { status: 400 });
+    }
+
+    const job = await this.getJob(normalizedId);
+    if (!job) {
+      return Response.json({ error: 'Job not found' }, { status: 404 });
+    }
+
+    return Response.json({ job });
+  }
+
+  private async processJob(job: CodeGenerationJobRecord, _payload: StartGenerationPayload): Promise<void> {
+    try {
+      await this.updateJob(job.jobId, {
+        status: 'running',
+        progress: Math.max(job.progress, 0),
+      });
+
+      // Placeholder: actual AI code generation will be implemented in TASK-014.
+      // This method establishes the lifecycle hooks and error handling so that
+      // future implementations can focus on generation logic.
+    } catch (error) {
+      console.error('Failed to transition job into running state', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      await this.updateJob(job.jobId, {
+        status: 'failed',
+        error: message,
+      });
+    }
+  }
+
+  private async getJob(): Promise<CodeGenerationJobRecord | null> {
+    // The job data can be stored under a constant key as the DO instance is unique per job.
+    return this.ctx.storage.get<CodeGenerationJobRecord>('job');
+  }
+
+  private async putJob(job: CodeGenerationJobRecord): Promise<void> {
+    await this.ctx.storage.put(this.jobKey(job.jobId), job);
+  }
+
+  private async updateJob(
+    jobId: string,
+    updates: Partial<Omit<CodeGenerationJobRecord, 'jobId' | 'taskId' | 'createdAt'>>,
+  ): Promise<CodeGenerationJobRecord | null> {
+    const existing = await this.getJob(jobId);
+    if (!existing) {
+      return null;
+    }
+
+    const next: CodeGenerationJobRecord = {
+      ...existing,
+      ...updates,
+      progress: this.normalizeProgress(updates.progress ?? existing.progress),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.putJob(next);
+    return next;
+  }
+
+  private normalizeProgress(value: number): number {
+    if (!Number.isFinite(value)) {
+      return 0;
+    }
+    return Math.min(Math.max(value, 0), 100);
+  }
+
+  private buildResultKey(taskId: number, jobId: string, extension?: string): string {
+    const ext = extension?.replace(/[^\w.-]/g, '') || 'txt';
+    return `tasks/${taskId}/generated_code${ext.startsWith('.') ? ext : `.${ext}`}`;
+  }
+
+  private async persistResult(
+    jobId: string,
+    taskId: number,
+    artifact: PersistedArtifact,
+  ): Promise<string> {
+    const key = this.buildResultKey(taskId, jobId, artifact.extension);
+    await this.env.CODE_BUCKET.put(key, artifact.content, {
+      httpMetadata: artifact.contentType ? { contentType: artifact.contentType } : undefined,
+      customMetadata: {
+        jobId,
+        taskId: String(taskId),
+        ...(artifact.metadata ?? {}),
+      },
+    });
+
+    await this.updateJob(jobId, { resultKey: key, progress: 100, status: 'completed' });
+    return key;
   }
 }

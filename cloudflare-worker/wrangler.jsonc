@@ -37,13 +37,27 @@
       {
         "name": "WEBSOCKET_SERVER",
         "class_name": "WebSocketServer"
+      },
+      {
+        "name": "CODE_GENERATOR",
+        "class_name": "CodeGeneratorDO"
       }
     ]
   },
+  "r2_buckets": [
+    {
+      "binding": "CODE_BUCKET",
+      "bucket_name": "ai-generated-code"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["WebSocketServer"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["CodeGeneratorDO"]
     }
   ]
 }
