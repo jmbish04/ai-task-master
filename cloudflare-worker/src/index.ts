@@ -924,13 +924,9 @@ export class CodeGeneratorDO extends DurableObject {
     }
   }
 
-  private jobKey(jobId: string): string {
-    return `${JOB_KEY_PREFIX}${jobId}`;
-  }
-
-  private async getJob(jobId: string): Promise<CodeGenerationJobRecord | null> {
-    const stored = await this.ctx.storage.get<CodeGenerationJobRecord>(this.jobKey(jobId));
-    return stored ?? null;
+  private async getJob(): Promise<CodeGenerationJobRecord | null> {
+    // The job data can be stored under a constant key as the DO instance is unique per job.
+    return this.ctx.storage.get<CodeGenerationJobRecord>('job');
   }
 
   private async putJob(job: CodeGenerationJobRecord): Promise<void> {
