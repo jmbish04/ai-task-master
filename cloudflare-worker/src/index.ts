@@ -7,6 +7,7 @@ import { cors } from 'hono/cors';
 interface Env {
   DB: D1Database;
   WEBSOCKET_SERVER: DurableObjectNamespace<WebSocketServer>;
+  AI: Ai;
 }
 
 // Types and helpers from codex/complete-epic-0002-and-update-tasks
@@ -82,6 +83,31 @@ const textDecoder = new TextDecoder();
 const app = new Hono<{ Bindings: Env }>();
 
 app.use('/api/*', cors());
+
+const TASK_ROOM = 'tasks';
+
+type TaskBroadcastMessage = {
+  roomId?: string;
+  type: 'task_update';
+  action: 'created' | 'updated' | 'deleted';
+  taskId: number;
+  task?: TaskResponse | null;
+};
+
+const broadcastTaskUpdate = async (env: Env, message: TaskBroadcastMessage): Promise<void> => {
+  try {
+    const stub = env.WEBSOCKET_SERVER.getByName('broadcast');
+    await stub.fetch('https://do.websocket/broadcast', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ...message, roomId: message.roomId ?? TASK_ROOM }),
+    });
+  } catch (error) {
+    console.error('Failed to broadcast task update', error);
+  }
+};
 
 // Using the root route from 'main'
 app.get('/', (c) =>
@@ -200,8 +226,26 @@ app.post('/api/tasks', async (c) => {
   const taskId = Number(result.lastInsertRowId);
   const taskStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(taskId);
   const task = await taskStmt.first<TaskRow>();
+  const responseTask = task ? mapRowToResponse(task) : null;
 
-  return c.json({ task: task ? mapRowToResponse(task) : null }, 201);
+  if (responseTask) {
+    const broadcastPromise = broadcastTaskUpdate(c.env, {
+      type: 'task_update',
+      action: 'created',
+      taskId,
+      task: responseTask,
+    });
+
+    if (c.executionCtx) {
+      c.executionCtx.waitUntil(broadcastPromise);
+    } else {
+      broadcastPromise.catch((error) => {
+        console.error('Failed to dispatch creation broadcast', error);
+      });
+    }
+  }
+
+  return c.json({ task: responseTask }, 201);
 });
 
 app.put('/api/tasks/:id', async (c) => {
@@ -282,13 +326,35 @@ app.put('/api/tasks/:id', async (c) => {
     return c.json({ error: 'Task not found after update' }, 404);
   }
 
-  return c.json({ task: mapRowToResponse(task) });
+  const responseTask = mapRowToResponse(task);
+  const broadcastPromise = broadcastTaskUpdate(c.env, {
+    type: 'task_update',
+    action: 'updated',
+    taskId: id,
+    task: responseTask,
+  });
+
+  if (c.executionCtx) {
+    c.executionCtx.waitUntil(broadcastPromise);
+  } else {
+    broadcastPromise.catch((error) => {
+      console.error('Failed to dispatch update broadcast', error);
+    });
+  }
+
+  return c.json({ task: responseTask });
 });
 
 app.delete('/api/tasks/:id', async (c) => {
   const id = Number(c.req.param('id'));
   if (!Number.isInteger(id)) {
     return c.json({ error: 'Task ID must be an integer' }, 400);
+  }
+
+  const existingStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
+  const existingTask = await existingStmt.first<TaskRow>();
+  if (!existingTask) {
+    return c.json({ error: 'Task not found' }, 404);
   }
 
   const deleteStmt = c.env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(id);
@@ -303,7 +369,129 @@ app.delete('/api/tasks/:id', async (c) => {
     return c.json({ error: 'Task not found' }, 404);
   }
 
+  const broadcastPromise = broadcastTaskUpdate(c.env, {
+    type: 'task_update',
+    action: 'deleted',
+    taskId: id,
+    task: mapRowToResponse(existingTask),
+  });
+
+  if (c.executionCtx) {
+    c.executionCtx.waitUntil(broadcastPromise);
+  } else {
+    broadcastPromise.catch((error) => {
+      console.error('Failed to dispatch delete broadcast', error);
+    });
+  }
+
   return c.json({ success: true });
+});
+
+app.post('/api/tasks/:id/resolve', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) {
+    return c.json({ error: 'Task ID must be an integer' }, 400);
+  }
+
+  let payload: { issue?: string };
+  try {
+    payload = await c.req.json<{ issue?: string }>();
+  } catch (error) {
+    console.error('Failed to parse JSON body for POST /api/tasks/:id/resolve', error);
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const issue = payload.issue?.trim();
+  if (!issue) {
+    return c.json({ error: 'Issue description is required' }, 400);
+  }
+
+  const taskStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
+  const task = await taskStmt.first<TaskRow>();
+  if (!task) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
+
+  const taskDetails = mapRowToResponse(task);
+  const prompt = [
+    'You are the AI Task Master assistant helping engineers resolve issues.',
+    'Analyze the task details and the reported issue. Provide actionable recommendations.',
+    '',
+    `Task ID: ${taskDetails.id}`,
+    `Title: ${taskDetails.title}`,
+    `Description: ${taskDetails.description ?? 'No description provided.'}`,
+    `Status: ${taskDetails.status}`,
+    `Priority: ${taskDetails.priority}`,
+    `Dependencies: ${taskDetails.dependencies.length ? taskDetails.dependencies.join(', ') : 'None'}`,
+    `Subtasks: ${taskDetails.subtasks.length ? taskDetails.subtasks.join(', ') : 'None'}`,
+    '',
+    `Issue reported: ${issue}`,
+    '',
+    'Respond with a strict JSON object containing the keys:',
+    "analysis (string)",
+    "root_cause (string)",
+    "recommended_steps (array of strings in execution order)",
+    "risk_level (string with one of: low, medium, high)",
+    'The JSON must be valid and should not include any additional commentary.',
+  ].join('\n');
+
+  let aiResponse: { response?: string };
+  try {
+    aiResponse = await c.env.AI.run('@cf/meta/llama-3.1-8b-instruct', { prompt });
+  } catch (error) {
+    console.error('Workers AI resolve request failed', error);
+    return c.json({ error: 'Failed to analyze issue with AI' }, 502);
+  }
+
+  const rawContent =
+    typeof aiResponse?.response === 'string'
+      ? aiResponse.response
+      : typeof (aiResponse as unknown) === 'string'
+        ? (aiResponse as unknown as string)
+        : '';
+
+  const normalizedContent = rawContent.replace(/```json\s*|```/gi, '').trim();
+  let parsed: Record<string, unknown> | undefined;
+  if (normalizedContent) {
+    try {
+      parsed = JSON.parse(normalizedContent);
+    } catch (error) {
+      console.warn('Unable to parse AI response as JSON; returning raw output', error);
+    }
+  }
+
+  const analysis = typeof parsed?.analysis === 'string' ? parsed.analysis : normalizedContent || rawContent;
+  const rootCause =
+    typeof parsed?.root_cause === 'string'
+      ? parsed.root_cause
+      : typeof parsed?.rootCause === 'string'
+        ? parsed.rootCause
+        : null;
+  const recommendedStepsSource = Array.isArray(parsed?.recommended_steps)
+    ? parsed?.recommended_steps
+    : Array.isArray(parsed?.recommendedSteps)
+      ? parsed?.recommendedSteps
+      : [];
+  const recommendedSteps = recommendedStepsSource.map((step) => String(step)).filter((step) => step.length > 0);
+  const riskLevel =
+    typeof parsed?.risk_level === 'string'
+      ? parsed.risk_level
+      : typeof parsed?.riskLevel === 'string'
+        ? parsed.riskLevel
+        : null;
+
+  return c.json({
+    task: taskDetails,
+    issue,
+    resolution: {
+      analysis: analysis || 'No analysis available.',
+      rootCause,
+      recommendedSteps,
+      riskLevel,
+      model: '@cf/meta/llama-3.1-8b-instruct',
+      raw: rawContent,
+    },
+  });
 });
 
 // --- WebSocket route from main branch ---
@@ -338,7 +526,7 @@ type ConnectionMetadata = {
 };
 
 export class WebSocketServer extends DurableObject {
-  private readonly connections = new Map<WebSocket, ConnectionMetadata>();
+  private readonly sessions = new Map<WebSocket, ConnectionMetadata>();
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
@@ -346,21 +534,66 @@ export class WebSocketServer extends DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const upgradeHeader = request.headers.get('Upgrade');
-    if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
-      return new Response('Expected WebSocket upgrade request.', { status: 426 });
+    if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
+      const webSocketPair = new WebSocketPair();
+      const { 0: client, 1: server } = webSocketPair;
+
+      const url = new URL(request.url);
+      const roomId = url.pathname.split('/').filter(Boolean).pop() ?? 'default';
+      const connectionId = crypto.randomUUID();
+
+      this.sessions.set(server, { roomId, connectionId });
+      this.ctx.acceptWebSocket(server, [roomId, connectionId]);
+
+      return new Response(null, { status: 101, webSocket: client });
     }
 
-    const webSocketPair = new WebSocketPair();
-    const { 0: client, 1: server } = webSocketPair;
+    if (request.method === 'POST') {
+      const url = new URL(request.url);
+      if (url.pathname === '/broadcast') {
+        return this.handleBroadcast(request);
+      }
+    }
 
-    const url = new URL(request.url);
-    const roomId = url.pathname.split('/').filter(Boolean).pop() ?? 'default';
-    const connectionId = crypto.randomUUID();
+    return new Response('Not found', { status: 404 });
+  }
 
-    this.connections.set(server, { roomId, connectionId });
-    this.ctx.acceptWebSocket(server, [roomId, connectionId]);
+  private async handleBroadcast(request: Request): Promise<Response> {
+    let payload: TaskBroadcastMessage & { [key: string]: unknown };
+    try {
+      payload = await request.json<TaskBroadcastMessage & { [key: string]: unknown }>();
+    } catch (error) {
+      console.error('Invalid broadcast payload received', error);
+      return Response.json({ error: 'Invalid broadcast payload' }, { status: 400 });
+    }
 
-    return new Response(null, { status: 101, webSocket: client });
+    const roomId = typeof payload.roomId === 'string' && payload.roomId.trim().length > 0 ? payload.roomId.trim() : 'default';
+    const message = JSON.stringify({ ...payload, roomId });
+
+    const sockets = this.ctx.getWebSockets(roomId);
+    let delivered = 0;
+
+    for (const socket of sockets) {
+      const metadata = this.getOrRestoreMetadata(socket);
+      if (!metadata) {
+        continue;
+      }
+
+      try {
+        socket.send(message);
+        delivered += 1;
+      } catch (error) {
+        console.error('Failed to deliver broadcast message', error);
+        try {
+          socket.close(1011, 'Broadcast delivery failure.');
+        } catch (closeError) {
+          console.error('Failed to close socket after broadcast failure', closeError);
+        }
+        this.sessions.delete(socket);
+      }
+    }
+
+    return Response.json({ success: true, delivered });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -409,7 +642,7 @@ export class WebSocketServer extends DurableObject {
       return;
     }
 
-    this.connections.delete(ws);
+    this.sessions.delete(ws);
 
     const peers = this.ctx.getWebSockets(metadata.roomId);
     for (const peer of peers) {
@@ -436,11 +669,11 @@ export class WebSocketServer extends DurableObject {
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
     console.error('WebSocket error encountered', error);
     ws.close(1011, 'WebSocket error encountered.');
-    this.connections.delete(ws);
+    this.sessions.delete(ws);
   }
 
   private getOrRestoreMetadata(ws: WebSocket): ConnectionMetadata | undefined {
-    const metadata = this.connections.get(ws);
+    const metadata = this.sessions.get(ws);
     if (metadata) {
       return metadata;
     }
@@ -452,7 +685,7 @@ export class WebSocketServer extends DurableObject {
           roomId: tags[0],
           connectionId: tags[1],
         };
-        this.connections.set(ws, restored);
+        this.sessions.set(ws, restored);
         return restored;
       }
     } catch (error) {

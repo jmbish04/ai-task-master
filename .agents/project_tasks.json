@@ -77,7 +77,7 @@
           "taskId": "TASK-007",
           "title": "Setup Durable Object for WebSockets",
           "description": "Create a Durable Object to manage WebSocket connections, handle message broadcasting, and maintain connection state.",
-          "status": "pending",
+          "status": "completed",
           "dependencies": [
             "TASK-003"
           ],
@@ -87,7 +87,7 @@
           "taskId": "TASK-008",
           "title": "Broadcast Task Updates",
           "description": "Whenever a task is created or its status is updated, broadcast the change to all connected WebSocket clients.",
-          "status": "pending",
+          "status": "completed",
           "dependencies": [
             "TASK-006",
             "TASK-007"
@@ -105,7 +105,7 @@
           "taskId": "TASK-009",
           "title": "Bind Workers AI to Worker",
           "description": "Configure `wrangler.toml` to bind the Workers AI service.",
-          "status": "pending",
+          "status": "completed",
           "dependencies": [
             "TASK-001"
           ],
@@ -115,7 +115,7 @@
           "taskId": "TASK-010",
           "title": "Implement 'resolve-issue' Endpoint",
           "description": "Create an endpoint that takes a task ID and an issue description. The endpoint will use Workers AI to analyze the task and suggest a resolution.",
-          "status": "pending",
+          "status": "completed",
           "dependencies": [
             "TASK-009"
           ],
