@@ -147,8 +147,9 @@ app.get('/api/tasks', async (c) => {
 });
 
 app.get('/api/tasks/:id', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) {
+  const idParam = c.req.param('id');
+  const id = parseInt(idParam, 10);
+  if (isNaN(id)) {
     return c.json({ error: 'Task ID must be an integer' }, 400);
   }
 
