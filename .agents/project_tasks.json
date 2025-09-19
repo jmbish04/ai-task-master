@@ -1,0 +1,182 @@
+{
+  "projectName": "AI Task Master Cloudflare Worker",
+  "description": "A detailed project plan to build an AI-powered task management and orchestration server on the Cloudflare stack.",
+  "epics": [
+    {
+      "epicId": "EPIC-001",
+      "title": "Core Worker Setup & API Foundation",
+      "description": "Establish the basic Cloudflare Worker, routing, and real-time communication backbone.",
+      "tasks": [
+        {
+          "taskId": "TASK-001",
+          "title": "Initialize Wrangler Project",
+          "description": "Set up a new Cloudflare Worker project using Wrangler.",
+          "status": "pending",
+          "instructions": "Use `wrangler init`. Refer to `.agents/cloudflare_docs/worker_setup.llm_txt.txt` for project structure and configuration best practices."
+        },
+        {
+          "taskId": "TASK-002",
+          "title": "Implement Basic Routing",
+          "description": "Set up an HTTP router (e.g., Hono or itty-router) to handle incoming requests.",
+          "status": "pending",
+          "dependencies": ["TASK-001"],
+          "instructions": "Integrate a router to handle different API endpoints. Details and examples are in `.agents/cloudflare_docs/worker_routing.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-003",
+          "title": "Create WebSocket Endpoint",
+          "description": "Implement an endpoint that upgrades HTTP connections to WebSockets for real-time communication.",
+          "status": "pending",
+          "dependencies": ["TASK-002"],
+          "instructions": "Refer to `.agents/cloudflare_docs/worker_websockets.llm_txt.txt` to handle the `Upgrade` header and establish a WebSocket connection."
+        }
+      ]
+    },
+    {
+      "epicId": "EPIC-002",
+      "title": "D1 Database Integration for Task Persistence",
+      "description": "Integrate Cloudflare D1 to store and manage all project tasks.",
+      "tasks": [
+        {
+          "taskId": "TASK-004",
+          "title": "Design D1 Database Schema",
+          "description": "Define the SQL schema for tasks, including columns for id, title, description, status, priority, dependencies, and subtasks.",
+          "status": "pending",
+          "instructions": "Create a `schema.sql` file. For data types and best practices, see `.agents/cloudflare_docs/d1_schema_design.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-005",
+          "title": "Bind D1 Database to Worker",
+          "description": "Configure `wrangler.toml` to bind a D1 database to the worker.",
+          "status": "pending",
+          "dependencies": ["TASK-001", "TASK-004"],
+          "instructions": "Follow the binding instructions in `.agents/cloudflare_docs/d1_bindings.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-006",
+          "title": "Implement Task CRUD Operations",
+          "description": "Write and expose API endpoints for creating, reading, updating, and deleting tasks in the D1 database.",
+          "status": "pending",
+          "dependencies": ["TASK-005"],
+          "instructions": "Use the D1 client API to implement all CRUD functions. Code examples are available in `.agents/cloudflare_docs/d1_crud_operations.llm_txt.txt`."
+        }
+      ]
+    },
+    {
+      "epicId": "EPIC-003",
+      "title": "Real-time Multi-Agent Communication",
+      "description": "Enable multiple agents to communicate and receive task updates in real-time.",
+      "tasks": [
+        {
+          "taskId": "TASK-007",
+          "title": "Setup Durable Object for WebSockets",
+          "description": "Create a Durable Object to manage WebSocket connections, handle message broadcasting, and maintain connection state.",
+          "status": "pending",
+          "dependencies": ["TASK-003"],
+          "instructions": "Configure and implement a Durable Object for stateful WebSocket management. See `.agents/cloudflare_docs/durable_objects_websockets.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-008",
+          "title": "Broadcast Task Updates",
+          "description": "Whenever a task is created or its status is updated, broadcast the change to all connected WebSocket clients.",
+          "status": "pending",
+          "dependencies": ["TASK-006", "TASK-007"],
+          "instructions": "Trigger a broadcast from your CRUD endpoints to the Durable Object. See `.agents/cloudflare_docs/durable_objects_websockets.llm_txt.txt` for broadcasting patterns."
+        }
+      ]
+    },
+    {
+      "epicId": "EPIC-004",
+      "title": "AI Orchestration with Workers AI",
+      "description": "Use Workers AI to intelligently orchestrate tasks and assist agents.",
+      "tasks": [
+        {
+          "taskId": "TASK-009",
+          "title": "Bind Workers AI to Worker",
+          "description": "Configure `wrangler.toml` to bind the Workers AI service.",
+          "status": "pending",
+          "dependencies": ["TASK-001"],
+          "instructions": "Follow binding instructions in `.agents/cloudflare_docs/workers_ai_setup.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-010",
+          "title": "Implement 'resolve-issue' Endpoint",
+          "description": "Create an endpoint that takes a task ID and an issue description. The endpoint will use Workers AI to analyze the task and suggest a resolution.",
+          "status": "pending",
+          "dependencies": ["TASK-009"],
+          "instructions": "Prompt the `@cf/meta/llama-3-8b-instruct` model with the task details and the issue. Return the AI's suggestion. See prompting guides in `.agents/cloudflare_docs/workers_ai_prompts.llm_txt.txt`."
+        }
+      ]
+    },
+    {
+      "epicId": "EPIC-005",
+      "title": "AI Code Generation and R2 Integration",
+      "description": "Build the workflow for generating code with AI and making it available for download.",
+      "tasks": [
+        {
+          "taskId": "TASK-011",
+          "title": "Bind R2 Bucket to Worker",
+          "description": "Configure `wrangler.toml` to bind an R2 bucket for storing generated files.",
+          "status": "pending",
+          "dependencies": ["TASK-001"],
+          "instructions": "Follow the R2 binding guide in `.agents/cloudflare_docs/r2_bindings.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-012",
+          "title": "Create Durable Object for Code Generation",
+          "description": "Set up a Durable Object to manage the state and execution of code generation requests.",
+          "status": "pending",
+          "dependencies": ["TASK-009", "TASK-011"],
+          "instructions": "This DO will orchestrate calls to Workers AI and R2. Refer to `.agents/cloudflare_docs/durable_objects_long_running.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-013",
+          "title": "Implement '/generate-code' Endpoint",
+          "description": "Create an endpoint that accepts a task ID. This endpoint will instantiate the code generation Durable Object to start the process.",
+          "status": "pending",
+          "dependencies": ["TASK-012"],
+          "instructions": "This endpoint should be asynchronous and return a job ID immediately. The DO will handle the background processing."
+        },
+        {
+          "taskId": "TASK-014",
+          "title": "Implement Code Generation Logic",
+          "description": "Inside the Durable Object, call Workers AI with the task description to generate code, then write the output to the R2 bucket.",
+          "status": "pending",
+          "dependencies": ["TASK-012"],
+          "instructions": "Use the task description to build a detailed prompt for Workers AI. On success, use the R2 client API to `put` the object. See `.agents/cloudflare_docs/workers_ai_code_generation.llm_txt.txt` and `.agents/cloudflare_docs/r2_file_operations.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-015",
+          "title": "Implement '/download-code' Endpoint",
+          "description": "Create an endpoint that takes a task ID and serves the corresponding file from the R2 bucket, allowing for download via `curl` or other clients.",
+          "status": "pending",
+          "dependencies": ["TASK-011", "TASK-014"],
+          "instructions": "Use the R2 client API to `get` the object and stream it in the response. See `.agents/cloudflare_docs/r2_file_operations.llm_txt.txt`."
+        }
+      ]
+    },
+    {
+      "epicId": "EPIC-006",
+      "title": "Frontend & MCP Server Support",
+      "description": "Expose endpoints for a frontend application and ensure MCP compliance.",
+      "tasks": [
+        {
+          "taskId": "TASK-016",
+          "title": "Implement Frontend API Endpoints",
+          "description": "Ensure all necessary data-fetching endpoints (e.g., get all tasks, get task by ID) are available and optimized for a frontend client.",
+          "status": "pending",
+          "dependencies": ["TASK-006"],
+          "instructions": "Review all existing endpoints and add any missing ones required for a full UI experience. Ensure CORS policies are correctly configured. Reference `.agents/cloudflare_docs/worker_cors.llm_txt.txt`."
+        },
+        {
+          "taskId": "TASK-017",
+          "title": "Integrate MCP Server Logic",
+          "description": "Add support for the MCP protocol for interoperability with other MCP-compliant agents.",
+          "status": "pending",
+          "dependencies": ["TASK-002"],
+          "instructions": "This is a placeholder for a future, more detailed epic. For now, create a stub endpoint at `/mcp` that returns `{ 'status': 'ok' }`. Refer to `.agents/cloudflare_docs/mcp_integration_overview.llm_txt.txt` for initial concepts."
+        }
+      ]
+    }
+  ]
+}
