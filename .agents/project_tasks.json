@@ -11,7 +11,7 @@
           "taskId": "TASK-001",
           "title": "Initialize Wrangler Project",
           "description": "Set up a new Cloudflare Worker project using Wrangler.",
-          "status": "pending",
+          "status": "done",
           "instructions": "Use `wrangler init`. Refer to `.agents/cloudflare_docs/worker_setup.llm_txt.txt` for project structure and configuration best practices."
         },
         {
