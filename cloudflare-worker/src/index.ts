@@ -55,7 +55,7 @@ export class WebSocketServer extends DurableObject {
                 }
 
                 const webSocketPair = new WebSocketPair();
-                const [client, server] = Object.values(webSocketPair) as [WebSocket, WebSocket];
+                const { 0: client, 1: server } = webSocketPair;
 
                 const url = new URL(request.url);
                 const roomId = url.pathname.split('/').filter(Boolean).pop() ?? 'default';
