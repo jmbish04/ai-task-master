@@ -191,7 +191,7 @@
           "taskId": "TASK-016",
           "title": "Implement Frontend API Endpoints",
           "description": "Ensure all necessary data-fetching endpoints (e.g., get all tasks, get task by ID) are available and optimized for a frontend client.",
-          "status": "pending",
+          "status": "done",
           "dependencies": [
             "TASK-006"
           ],
@@ -201,7 +201,7 @@
           "taskId": "TASK-017",
           "title": "Integrate MCP Server Logic",
           "description": "Add support for the MCP protocol for interoperability with other MCP-compliant agents.",
-          "status": "pending",
+          "status": "done",
           "dependencies": [
             "TASK-002"
           ],

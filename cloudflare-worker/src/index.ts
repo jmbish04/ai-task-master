@@ -1,7 +1,10 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { DurableObjectNamespace, DurableObjectState, R2Bucket, WebSocket } from 'cloudflare:workers';
 import { Hono } from 'hono';
+import type { Context } from 'hono';
 import { cors } from 'hono/cors';
+import { HTTPException } from 'hono/http-exception';
+import { validator } from 'hono/validator';
 
 // The merged Env interface requires bindings from both branches.
 interface Env {
@@ -44,6 +47,76 @@ type TaskPayload = {
   priority?: number;
   dependencies?: unknown;
   subtasks?: unknown;
+};
+
+type TaskUpdateBody = {
+  title?: string;
+  description?: string | null;
+  status?: string;
+  priority?: number;
+  dependencies?: string[];
+  subtasks?: string[];
+};
+
+type TaskStatusUpdateBody = {
+  status: string;
+};
+
+type TaskListQuery = {
+  page: number;
+  limit: number;
+  status?: string;
+  priority?: number;
+  search?: string;
+};
+
+type TaskListResponse = {
+  success: true;
+  data: {
+    tasks: TaskResponse[];
+  };
+  tasks: TaskResponse[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
+};
+
+type TaskItemResponse = {
+  success: true;
+  data: {
+    task: TaskResponse;
+  };
+  task: TaskResponse;
+};
+
+type McpRequest = {
+  jsonrpc: '2.0';
+  method: string;
+  params?: Record<string, unknown>;
+  id?: string | number | null;
+};
+
+type McpSuccessResponse = {
+  jsonrpc: '2.0';
+  result: {
+    status: 'ok';
+    version: string;
+    capabilities: string[];
+  };
+  id: string | number | null;
+};
+
+type McpErrorResponse = {
+  jsonrpc: '2.0';
+  error: {
+    code: number;
+    message: string;
+  };
+  id: string | number | null;
 };
 
 type CodeGenerationJobStatus = 'queued' | 'running' | 'completed' | 'failed';
@@ -113,10 +186,68 @@ const mapRowToResponse = (row: TaskRow): TaskResponse => ({
 
 // From main branch
 const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+
+type AppContext = Context<{ Bindings: Env }>;
+
+const bufferToHex = (buffer: ArrayBuffer): string =>
+  Array.from(new Uint8Array(buffer))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+
+const createStrongEtag = async (payload: string): Promise<string> => {
+  const digest = await crypto.subtle.digest('SHA-256', textEncoder.encode(payload));
+  return `"${bufferToHex(digest)}"`;
+};
+
+const matchesEtag = (header: string | null, etag: string): boolean => {
+  if (!header) {
+    return false;
+  }
+
+  const candidates = header.split(',').map((value) => value.trim());
+  return candidates.includes('*') || candidates.includes(etag);
+};
+
+const respondWithJson = async <T>(
+  c: AppContext,
+  payload: T,
+  status = 200,
+  cacheSeconds = 60,
+): Promise<Response> => {
+  const serialized = JSON.stringify(payload);
+  const etag = await createStrongEtag(serialized);
+
+  if (matchesEtag(c.req.header('If-None-Match'), etag)) {
+    const notModified = c.body(null, 304);
+    notModified.headers.set('ETag', etag);
+    if (cacheSeconds > 0) {
+      notModified.headers.set('Cache-Control', `public, max-age=${cacheSeconds}`);
+    }
+    return notModified;
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json; charset=utf-8',
+    ETag: etag,
+  };
+
+  if (cacheSeconds > 0) {
+    headers['Cache-Control'] = `public, max-age=${cacheSeconds}`;
+  }
+
+  return c.newResponse(serialized, status, headers);
+};
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use('/api/*', cors());
+app.use(
+  '/api/*',
+  cors({
+    origin: ['http://localhost:3000', 'https://yourdomain.com'],
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  }),
+);
 
 const TASK_ROOM = 'tasks';
 
@@ -127,6 +258,129 @@ type TaskBroadcastMessage = {
   taskId: number;
   task?: TaskResponse | null;
 };
+
+type TaskParam = {
+  id: number;
+};
+
+const taskParamValidator = validator('param', (value): TaskParam => {
+  const id = Number(value?.id);
+  if (!Number.isInteger(id) || id < 1) {
+    throw new HTTPException(400, { message: 'Task ID must be a positive integer.' });
+  }
+
+  return { id };
+});
+
+const listQueryValidator = validator('query', (value): TaskListQuery => {
+  const rawPage = value?.page ?? '1';
+  const rawLimit = value?.limit ?? '20';
+
+  const page = Number.parseInt(rawPage, 10);
+  if (!Number.isFinite(page) || page < 1) {
+    throw new HTTPException(400, { message: 'Invalid page parameter. Page must be a positive integer.' });
+  }
+
+  const limit = Number.parseInt(rawLimit, 10);
+  if (!Number.isFinite(limit) || limit < 1) {
+    throw new HTTPException(400, { message: 'Invalid limit parameter. Limit must be a positive integer.' });
+  }
+
+  const sanitized: TaskListQuery = {
+    page,
+    limit: Math.min(limit, 100),
+  };
+
+  if (typeof value?.status === 'string' && value.status.trim().length > 0) {
+    sanitized.status = value.status.trim();
+  }
+
+  if (typeof value?.priority === 'string' && value.priority.trim().length > 0) {
+    const parsedPriority = Number(value.priority);
+    if (!Number.isFinite(parsedPriority)) {
+      throw new HTTPException(400, { message: 'Invalid priority parameter. Priority must be numeric.' });
+    }
+    sanitized.priority = parsedPriority;
+  }
+
+  if (typeof value?.search === 'string' && value.search.trim().length > 0) {
+    sanitized.search = value.search.trim();
+  }
+
+  return sanitized;
+});
+
+const updateTaskBodyValidator = validator('json', (value): TaskUpdateBody => {
+  if (!value || typeof value !== 'object') {
+    throw new HTTPException(400, { message: 'Request body must be a JSON object.' });
+  }
+
+  const payload = value as Record<string, unknown>;
+  const sanitized: TaskUpdateBody = {};
+
+  if ('title' in payload) {
+    if (typeof payload.title !== 'string' || payload.title.trim().length === 0) {
+      throw new HTTPException(400, { message: 'Title must be a non-empty string when provided.' });
+    }
+    sanitized.title = payload.title.trim();
+  }
+
+  if ('description' in payload) {
+    const description = payload.description;
+    if (description !== null && typeof description !== 'string') {
+      throw new HTTPException(400, { message: 'Description must be a string or null.' });
+    }
+    sanitized.description = description === null ? null : description.trim();
+  }
+
+  if ('status' in payload) {
+    if (typeof payload.status !== 'string' || payload.status.trim().length === 0) {
+      throw new HTTPException(400, { message: 'Status must be a non-empty string when provided.' });
+    }
+    sanitized.status = payload.status.trim();
+  }
+
+  if ('priority' in payload) {
+    const priority = Number(payload.priority);
+    if (!Number.isFinite(priority)) {
+      throw new HTTPException(400, { message: 'Priority must be a valid number.' });
+    }
+    sanitized.priority = priority;
+  }
+
+  if ('dependencies' in payload) {
+    if (!Array.isArray(payload.dependencies)) {
+      throw new HTTPException(400, { message: 'Dependencies must be an array of strings.' });
+    }
+    sanitized.dependencies = payload.dependencies.map((item) => String(item)).filter((item) => item.trim().length > 0);
+  }
+
+  if ('subtasks' in payload) {
+    if (!Array.isArray(payload.subtasks)) {
+      throw new HTTPException(400, { message: 'Subtasks must be an array of strings.' });
+    }
+    sanitized.subtasks = payload.subtasks.map((item) => String(item)).filter((item) => item.trim().length > 0);
+  }
+
+  if (Object.keys(sanitized).length === 0) {
+    throw new HTTPException(400, { message: 'No valid fields provided for update.' });
+  }
+
+  return sanitized;
+});
+
+const statusBodyValidator = validator('json', (value): TaskStatusUpdateBody => {
+  if (!value || typeof value !== 'object') {
+    throw new HTTPException(400, { message: 'Request body must be a JSON object.' });
+  }
+
+  const payload = value as Record<string, unknown>;
+  if (typeof payload.status !== 'string' || payload.status.trim().length === 0) {
+    throw new HTTPException(400, { message: 'Status is required and must be a non-empty string.' });
+  }
+
+  return { status: payload.status.trim() };
+});
 
 const broadcastTaskUpdate = async (env: Env, message: TaskBroadcastMessage): Promise<void> => {
   try {
@@ -151,67 +405,68 @@ app.get('/', (c) =>
 );
 
 // --- Task API routes from codex/complete-epic-0002-and-update-tasks ---
-app.get('/api/tasks', async (c) => {
-  const status = c.req.query('status');
-  const priorityParam = c.req.query('priority');
-  const search = c.req.query('search');
-  const limitParam = c.req.query('limit');
-  const offsetParam = c.req.query('offset');
+app.get('/api/tasks', listQueryValidator, async (c) => {
+  const { page, limit, status, priority, search } = c.req.valid('query');
 
   const conditions: string[] = [];
-  const bindings: unknown[] = [];
+  const filterBindings: unknown[] = [];
 
   if (status) {
     conditions.push('status = ?');
-    bindings.push(status);
+    filterBindings.push(status);
   }
 
-  if (priorityParam) {
-    const parsedPriority = Number(priorityParam);
-    if (!Number.isFinite(parsedPriority)) {
-      return c.json({ error: 'Invalid priority filter supplied' }, 400);
-    }
+  if (priority !== undefined) {
     conditions.push('priority = ?');
-    bindings.push(parsedPriority);
+    filterBindings.push(priority);
   }
 
   if (search) {
     conditions.push('(title LIKE ? OR description LIKE ?)');
     const searchTerm = `%${search}%`;
-    bindings.push(searchTerm, searchTerm);
+    filterBindings.push(searchTerm, searchTerm);
   }
 
-  let query = 'SELECT * FROM tasks';
-  if (conditions.length) {
-    query += ` WHERE ${conditions.join(' AND ')}`;
-  }
-  query += ' ORDER BY priority DESC, created_at DESC';
+  const whereClause = conditions.length ? ` WHERE ${conditions.join(' AND ')}` : '';
+  const offset = (page - 1) * limit;
 
-  const limit = Math.min(Math.max(Number(limitParam) || 50, 1), 100);
-  const offset = Math.max(Number(offsetParam) || 0, 0);
-  query += ' LIMIT ? OFFSET ?';
-  bindings.push(limit, offset);
+  const listStmt = c.env.DB.prepare(
+    `SELECT * FROM tasks${whereClause} ORDER BY priority DESC, created_at DESC LIMIT ? OFFSET ?`,
+  ).bind(...filterBindings, limit, offset);
 
-  const stmt = c.env.DB.prepare(query).bind(...bindings);
-  const { results } = await stmt.all<TaskRow>();
+  const countStmt = c.env.DB.prepare(`SELECT COUNT(*) as total FROM tasks${whereClause}`).bind(
+    ...filterBindings,
+  );
 
+  const [{ results }, countRow] = await Promise.all([
+    listStmt.all<TaskRow>(),
+    countStmt.first<{ total: number }>(),
+  ]);
+
+  const total = countRow?.total ?? 0;
   const tasks = (results ?? []).map(mapRowToResponse);
-  return c.json({
+  const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+
+  const response: TaskListResponse = {
+    success: true,
+    data: {
+      tasks,
+    },
     tasks,
     pagination: {
+      page,
       limit,
-      offset,
-      count: tasks.length,
+      total,
+      totalPages,
+      hasMore: page * limit < total,
     },
-  });
+  };
+
+  return respondWithJson(c, response);
 });
 
-app.get('/api/tasks/:id', async (c) => {
-  const idParam = c.req.param('id');
-  const id = parseInt(idParam, 10);
-  if (isNaN(id)) {
-    return c.json({ error: 'Task ID must be an integer' }, 400);
-  }
+app.get('/api/tasks/:id', taskParamValidator, async (c) => {
+  const { id } = c.req.valid('param');
 
   const stmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
   const task = await stmt.first<TaskRow>();
@@ -219,7 +474,17 @@ app.get('/api/tasks/:id', async (c) => {
     return c.json({ error: 'Task not found' }, 404);
   }
 
-  return c.json({ task: mapRowToResponse(task) });
+  const taskResponse = mapRowToResponse(task);
+
+  const response: TaskItemResponse = {
+    success: true,
+    data: {
+      task: taskResponse,
+    },
+    task: taskResponse,
+  };
+
+  return respondWithJson(c, response);
 });
 
 app.post('/api/tasks', async (c) => {
@@ -282,29 +547,16 @@ app.post('/api/tasks', async (c) => {
   return c.json({ task: responseTask }, 201);
 });
 
-app.put('/api/tasks/:id', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) {
-    return c.json({ error: 'Task ID must be an integer' }, 400);
-  }
-
-  let payload: TaskPayload;
-  try {
-    payload = await c.req.json<TaskPayload>();
-  } catch (error) {
-    console.error('Failed to parse JSON body for PUT /api/tasks/:id', error);
-    return c.json({ error: 'Invalid JSON body' }, 400);
-  }
+app.put('/api/tasks/:id', taskParamValidator, updateTaskBodyValidator, async (c) => {
+  const { id } = c.req.valid('param');
+  const payload = c.req.valid('json') as TaskUpdateBody;
 
   const updates: string[] = [];
   const bindings: unknown[] = [];
 
   if (payload.title !== undefined) {
-    if (!payload.title || !payload.title.trim()) {
-      return c.json({ error: 'Title cannot be empty' }, 400);
-    }
     updates.push('title = ?');
-    bindings.push(payload.title.trim());
+    bindings.push(payload.title);
   }
 
   if (payload.description !== undefined) {
@@ -314,26 +566,22 @@ app.put('/api/tasks/:id', async (c) => {
 
   if (payload.status !== undefined) {
     updates.push('status = ?');
-    bindings.push(payload.status.trim());
+    bindings.push(payload.status);
   }
 
   if (payload.priority !== undefined) {
-    const priority = Number(payload.priority);
-    if (!Number.isFinite(priority)) {
-      return c.json({ error: 'Priority must be a valid number' }, 400);
-    }
     updates.push('priority = ?');
-    bindings.push(priority);
+    bindings.push(payload.priority);
   }
 
   if (payload.dependencies !== undefined) {
     updates.push('dependencies = ?');
-    bindings.push(JSON.stringify(toStringArray(payload.dependencies)));
+    bindings.push(JSON.stringify(payload.dependencies));
   }
 
   if (payload.subtasks !== undefined) {
     updates.push('subtasks = ?');
-    bindings.push(JSON.stringify(toStringArray(payload.subtasks)));
+    bindings.push(JSON.stringify(payload.subtasks));
   }
 
   if (!updates.length) {
@@ -379,11 +627,8 @@ app.put('/api/tasks/:id', async (c) => {
   return c.json({ task: responseTask });
 });
 
-app.delete('/api/tasks/:id', async (c) => {
-  const id = Number(c.req.param('id'));
-  if (!Number.isInteger(id)) {
-    return c.json({ error: 'Task ID must be an integer' }, 400);
-  }
+app.delete('/api/tasks/:id', taskParamValidator, async (c) => {
+  const { id } = c.req.valid('param');
 
   const existingStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
   const existingTask = await existingStmt.first<TaskRow>();
@@ -419,6 +664,56 @@ app.delete('/api/tasks/:id', async (c) => {
   }
 
   return c.json({ success: true });
+});
+
+app.post('/api/tasks/:id/status', taskParamValidator, statusBodyValidator, async (c) => {
+  const { id } = c.req.valid('param');
+  const { status } = c.req.valid('json') as TaskStatusUpdateBody;
+
+  const existingStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
+  const existingTask = await existingStmt.first<TaskRow>();
+  if (!existingTask) {
+    return c.json({ error: 'Task not found' }, 404);
+  }
+
+  const updateStmt = c.env.DB.prepare(
+    "UPDATE tasks SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+  ).bind(status, id);
+  const updateResult = await updateStmt.run();
+
+  if (!updateResult.success) {
+    console.error('Failed to update task status', updateResult);
+    return c.json({ error: 'Failed to update task status' }, 500);
+  }
+
+  const refreshedStmt = c.env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(id);
+  const refreshedTask = await refreshedStmt.first<TaskRow>();
+  if (!refreshedTask) {
+    return c.json({ error: 'Task not found after status update' }, 404);
+  }
+
+  const responseTask = mapRowToResponse(refreshedTask);
+  const broadcastPromise = broadcastTaskUpdate(c.env, {
+    type: 'task_update',
+    action: 'updated',
+    taskId: id,
+    task: responseTask,
+  });
+
+  if (c.executionCtx) {
+    c.executionCtx.waitUntil(broadcastPromise);
+  } else {
+    broadcastPromise.catch((error) => {
+      console.error('Failed to broadcast task status update', error);
+    });
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      task: responseTask,
+    },
+  });
 });
 
 app.post('/api/tasks/:id/resolve', async (c) => {
@@ -619,6 +914,42 @@ app.get('/api/jobs/:jobId/status', async (c) => {
   }
 
   return c.json(durableJson ?? { job: null });
+});
+
+app.post('/mcp', async (c) => {
+  let payload: McpRequest;
+  try {
+    payload = await c.req.json<McpRequest>();
+  } catch (error) {
+    console.error('Invalid MCP payload received', error);
+    const response: McpErrorResponse = {
+      jsonrpc: '2.0',
+      error: { code: -32700, message: 'Invalid JSON payload' },
+      id: null,
+    };
+    return c.json(response, 400);
+  }
+
+  if (payload.jsonrpc !== '2.0' || typeof payload.method !== 'string' || payload.method.trim().length === 0) {
+    const response: McpErrorResponse = {
+      jsonrpc: '2.0',
+      error: { code: -32600, message: 'Invalid MCP request' },
+      id: payload.id ?? null,
+    };
+    return c.json(response, 400);
+  }
+
+  const response: McpSuccessResponse = {
+    jsonrpc: '2.0',
+    result: {
+      status: 'ok',
+      version: '1.0',
+      capabilities: ['task_management', 'ai_assistance'],
+    },
+    id: payload.id ?? null,
+  };
+
+  return c.json(response);
 });
 
 // --- WebSocket route from main branch ---
