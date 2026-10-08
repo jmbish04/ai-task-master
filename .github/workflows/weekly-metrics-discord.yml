@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   weekly-metrics:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.full_name && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","proxmox-actions"]') }}
     env:
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_METRICS_WEBHOOK }}
     steps:

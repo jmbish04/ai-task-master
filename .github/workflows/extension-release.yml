@@ -12,7 +12,7 @@ concurrency: extension-release-${{ github.ref }}
 
 jobs:
   publish-extension:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.full_name && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","proxmox-actions"]') }}
     environment: extension-release
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +101,7 @@ jobs:
   notify-success:
     needs: publish-extension
     if: success()
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.full_name && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","proxmox-actions"]') }}
     steps:
       - name: Success Notification
         run: |
