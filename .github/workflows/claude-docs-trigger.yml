@@ -13,7 +13,7 @@ jobs:
   trigger-docs-update:
     # Only run if changes were merged (not direct pushes from bots)
     if: github.actor != 'github-actions[bot]' && github.actor != 'dependabot[bot]'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64","proxmox-actions"]') }}
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
     permissions:
       contents: read
       actions: write
